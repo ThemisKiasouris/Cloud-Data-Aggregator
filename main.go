@@ -2,16 +2,21 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/xuri/excelize/v2"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
 )
+
+var outputMu sync.Mutex
 
 func main() {
 	reader := bufio.NewReader(os.Stdin)
@@ -56,16 +61,48 @@ func main() {
 		log.Fatalf("Unable to retrieve files: %v", err)
 	}
 
-	// Process each file
-	for _, i := range r.Files {
-		fmt.Printf("\n--- Scanning Spreadsheet: %s ---\n", i.Name)
-		processExcelData(i.Id, srv, targetKeywords)
+	if len(r.Files) == 0 {
+		fmt.Println("No spreadsheets found in the specified folder.")
+		return
 	}
+
+	const maxConcurrentFiles = 4
+	jobs := make(chan *drive.File, len(r.Files))
+	var wg sync.WaitGroup
+
+	for worker := 0; worker < maxConcurrentFiles; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for file := range jobs {
+				logf("\n--- Scanning Spreadsheet: %s ---\n", file.Name)
+				processExcelData(file.Id, srv, targetKeywords)
+			}
+		}()
+	}
+
+	for _, file := range r.Files {
+		jobs <- file
+	}
+	close(jobs)
+	wg.Wait()
 }
 
 func processExcelData(fileID string, srv *drive.Service, keywords []string) {
+	resp, err := srv.Files.Get(fileID).Download()
+	if err != nil {
+		log.Printf("Failed to download file %s: %v", fileID, err)
+		return
+	}
+	defer resp.Body.Close()
 
-	f, err := excelize.OpenFile("temp_downloaded_file.xlsx")
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Failed to read download for file %s: %v", fileID, err)
+		return
+	}
+
+	f, err := excelize.OpenReader(bytes.NewReader(data))
 	if err != nil {
 		log.Printf("Failed to open file %s: %v", fileID, err)
 		return
@@ -74,7 +111,7 @@ func processExcelData(fileID string, srv *drive.Service, keywords []string) {
 
 	rows, err := f.GetRows("Sheet1")
 	if err != nil {
-		log.Printf("Failed to read rows: %v", err)
+		log.Printf("Failed to read rows from file %s: %v", fileID, err)
 		return
 	}
 
@@ -86,7 +123,7 @@ func processExcelData(fileID string, srv *drive.Service, keywords []string) {
 			for _, keyword := range keywords {
 				// Using case-insensitive matching for better general utility
 				if strings.Contains(strings.ToLower(cellValue), strings.ToLower(keyword)) {
-					fmt.Printf("[Match] Row %d: Triggered by '%s' (Cell Value: %s)\n", rowIndex+1, keyword, cellValue)
+					logf("[Match] Row %d: Triggered by '%s' (Cell Value: %s)\n", rowIndex+1, keyword, cellValue)
 					matchCount++
 				}
 			}
@@ -94,8 +131,14 @@ func processExcelData(fileID string, srv *drive.Service, keywords []string) {
 	}
 
 	if matchCount == 0 {
-		fmt.Println("No matches found in this file.")
+		logf("No matches found in this file.\n")
 	} else {
-		fmt.Printf("Total matches found: %d\n", matchCount)
+		logf("Total matches found: %d\n", matchCount)
 	}
+}
+
+func logf(format string, args ...any) {
+	outputMu.Lock()
+	defer outputMu.Unlock()
+	fmt.Printf(format, args...)
 }
