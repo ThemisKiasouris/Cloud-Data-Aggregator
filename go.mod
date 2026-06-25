@@ -3,6 +3,7 @@ module data-aggregator
 go 1.25.8
 
 require (
+	github.com/joho/godotenv v1.5.1
 	github.com/xuri/excelize/v2 v2.10.1
 	google.golang.org/api v0.285.0
 )

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/joho/godotenv"
 	"github.com/xuri/excelize/v2"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
@@ -48,10 +49,15 @@ func main() {
 	fmt.Printf("\nInitializing scan for keywords: %v in folder: %s\n", targetKeywords, folderID)
 
 	// Drive API Initialization
-	ctx := context.Background()
-	srv, err := drive.NewService(ctx, option.WithCredentialsFile("credentials.json"))
+	credsJSON, err := loadCredentialsJSON()
 	if err != nil {
-		log.Fatalf("Unable to retrieve Drive client: %v", err)
+		log.Fatalf("Unable to load credentials: %v", err)
+	}
+
+	ctx := context.Background()
+	srv, err := drive.NewService(ctx, option.WithCredentialsJSON([]byte(credsJSON)))
+	if err != nil {
+		log.Fatalf("Unable to create Drive client: %v", err)
 	}
 
 	// Fetch files from the user-defined folder
@@ -86,6 +92,34 @@ func main() {
 	}
 	close(jobs)
 	wg.Wait()
+}
+
+func loadCredentialsJSON() (string, error) {
+	if creds := strings.TrimSpace(os.Getenv("GOOGLE_DRIVE_CREDENTIALS")); creds != "" {
+		return creds, nil
+	}
+
+	if _, err := os.Stat(".env"); err == nil {
+		if err := godotenv.Load(".env"); err != nil {
+			return "", fmt.Errorf("failed to load .env: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("failed to inspect .env: %w", err)
+	}
+
+	if creds := strings.TrimSpace(os.Getenv("GOOGLE_DRIVE_CREDENTIALS")); creds != "" {
+		return creds, nil
+	}
+
+	if _, err := os.Stat("credentials.json"); err == nil {
+		data, err := os.ReadFile("credentials.json")
+		if err != nil {
+			return "", fmt.Errorf("failed to read credentials.json: %w", err)
+		}
+		return string(data), nil
+	}
+
+	return "", fmt.Errorf("no credentials found; set GOOGLE_DRIVE_CREDENTIALS or add a .env file with that variable")
 }
 
 func processExcelData(fileID string, srv *drive.Service, keywords []string) {

@@ -56,6 +56,16 @@ Before running this tool, you must have the following installed and configured:
 
 4.  The script will initialize, authenticate with Google Drive, list the spreadsheets found, and print out any rows containing your target keywords.
 
+## Credentials
+
+Create a local `.env` file in the project root with your Google Drive credentials JSON:
+
+```env
+GOOGLE_DRIVE_CREDENTIALS={"installed":{"client_id":"...","client_secret":"..."}}
+```
+
+Do not commit this file. A sample template is available in `.env.example`.
+
 ## Dependencies
 
 * [excelize/v2]
