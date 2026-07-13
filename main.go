@@ -35,6 +35,7 @@ func main() {
 		log.Fatal("No keywords provided. Exiting.")
 	}
 
+	// Split the input into individual keywords and trim whitespace
 	rawKeywords := strings.Split(input, ",")
 	var targetKeywords []string
 	for _, kw := range rawKeywords {
@@ -67,11 +68,13 @@ func main() {
 		log.Fatalf("Unable to retrieve files: %v", err)
 	}
 
+	// Check if any files were found
 	if len(r.Files) == 0 {
 		fmt.Println("No spreadsheets found in the specified folder.")
 		return
 	}
 
+	// Concurrent Processing of Files
 	const maxConcurrentFiles = 4
 	jobs := make(chan *drive.File, len(r.Files))
 	var wg sync.WaitGroup
@@ -94,11 +97,13 @@ func main() {
 	wg.Wait()
 }
 
+// Loads credentials
 func loadCredentialsJSON() (string, error) {
 	if creds := strings.TrimSpace(os.Getenv("GOOGLE_DRIVE_CREDENTIALS")); creds != "" {
 		return creds, nil
 	}
 
+	// check for .env file in the current directory
 	if _, err := os.Stat(".env"); err == nil {
 		if err := godotenv.Load(".env"); err != nil {
 			return "", fmt.Errorf("failed to load .env: %w", err)
@@ -111,6 +116,7 @@ func loadCredentialsJSON() (string, error) {
 		return creds, nil
 	}
 
+	// Check for credentials.json file in the current directory
 	if _, err := os.Stat("credentials.json"); err == nil {
 		data, err := os.ReadFile("credentials.json")
 		if err != nil {
@@ -122,6 +128,7 @@ func loadCredentialsJSON() (string, error) {
 	return "", fmt.Errorf("no credentials found; set GOOGLE_DRIVE_CREDENTIALS or add a .env file with that variable")
 }
 
+// Processes the Excel data for matches
 func processExcelData(fileID string, srv *drive.Service, keywords []string) {
 	resp, err := srv.Files.Get(fileID).Download()
 	if err != nil {
@@ -171,6 +178,7 @@ func processExcelData(fileID string, srv *drive.Service, keywords []string) {
 	}
 }
 
+// Thread-safe logging function
 func logf(format string, args ...any) {
 	outputMu.Lock()
 	defer outputMu.Unlock()
