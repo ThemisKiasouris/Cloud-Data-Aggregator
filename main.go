@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
 
 	"github.com/joho/godotenv"
 	"github.com/xuri/excelize/v2"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
 )
@@ -29,13 +32,11 @@ func main() {
 		log.Fatalf("Failed to read input: %v", err)
 	}
 
-	// clean and parse the input into a slice
 	input = strings.TrimSpace(input)
 	if input == "" {
 		log.Fatal("No keywords provided. Exiting.")
 	}
 
-	// Split the input into individual keywords and trim whitespace
 	rawKeywords := strings.Split(input, ",")
 	var targetKeywords []string
 	for _, kw := range rawKeywords {
@@ -56,21 +57,37 @@ func main() {
 	}
 
 	ctx := context.Background()
-	srv, err := drive.NewService(ctx, option.WithCredentialsJSON([]byte(credsJSON)))
+
+	// Parse the Client ID JSON for OAuth 2.0
+	config, err := google.ConfigFromJSON([]byte(credsJSON), drive.DriveReadonlyScope)
+	if err != nil {
+		log.Fatalf("Unable to parse client secret file to config: %v", err)
+	}
+
+	// Get the token via browser prompt
+	tok := getTokenFromWeb(config)
+	client := config.Client(context.Background(), tok)
+
+	srv, err := drive.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
 		log.Fatalf("Unable to create Drive client: %v", err)
 	}
 
-	// Fetch files from the user-defined folder
-	query := fmt.Sprintf("'%s' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'", folderID)
-	r, err := srv.Files.List().Q(query).Fields("files(id, name)").Do()
+	// Fetch files from the user-defined folder, retrieving the mimeType
+	query := fmt.Sprintf("'%s' in parents", folderID)
+	r, err := srv.Files.List().
+		Q(query).
+		Fields("files(id, name, mimeType)").
+		IncludeItemsFromAllDrives(true).
+		SupportsAllDrives(true).
+		Do()
+
 	if err != nil {
 		log.Fatalf("Unable to retrieve files: %v", err)
 	}
 
-	// Check if any files were found
 	if len(r.Files) == 0 {
-		fmt.Println("No spreadsheets found in the specified folder.")
+		fmt.Println("No files found in the specified folder.")
 		return
 	}
 
@@ -84,8 +101,12 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for file := range jobs {
+				// Safely skip files that aren't spreadsheets (like PDFs or Word docs)
+				if !strings.Contains(file.MimeType, "spreadsheet") && !strings.Contains(file.MimeType, "excel") {
+					continue
+				}
 				logf("\n--- Scanning Spreadsheet: %s ---\n", file.Name)
-				processExcelData(file.Id, srv, targetKeywords)
+				processExcelData(file, srv, targetKeywords)
 			}
 		}()
 	}
@@ -97,26 +118,40 @@ func main() {
 	wg.Wait()
 }
 
+// Handles the OAuth 2.0 web prompt
+func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
+	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
+	fmt.Printf("Go to the following link in your browser then type the authorization code: \n%v\n", authURL)
+	fmt.Print("Enter the code here: ")
+
+	var authCode string
+	if _, err := fmt.Scan(&authCode); err != nil {
+		log.Fatalf("Unable to read authorization code: %v", err)
+	}
+
+	tok, err := config.Exchange(context.TODO(), authCode)
+	if err != nil {
+		log.Fatalf("Unable to retrieve token from web: %v", err)
+	}
+	return tok
+}
+
 // Loads credentials
 func loadCredentialsJSON() (string, error) {
 	if creds := strings.TrimSpace(os.Getenv("GOOGLE_DRIVE_CREDENTIALS")); creds != "" {
 		return creds, nil
 	}
 
-	// check for .env file in the current directory
 	if _, err := os.Stat(".env"); err == nil {
 		if err := godotenv.Load(".env"); err != nil {
 			return "", fmt.Errorf("failed to load .env: %w", err)
 		}
-	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("failed to inspect .env: %w", err)
 	}
 
 	if creds := strings.TrimSpace(os.Getenv("GOOGLE_DRIVE_CREDENTIALS")); creds != "" {
 		return creds, nil
 	}
 
-	// Check for credentials.json file in the current directory
 	if _, err := os.Stat("credentials.json"); err == nil {
 		data, err := os.ReadFile("credentials.json")
 		if err != nil {
@@ -125,46 +160,60 @@ func loadCredentialsJSON() (string, error) {
 		return string(data), nil
 	}
 
-	return "", fmt.Errorf("no credentials found; set GOOGLE_DRIVE_CREDENTIALS or add a .env file with that variable")
+	return "", fmt.Errorf("no credentials found")
 }
 
 // Processes the Excel data for matches
-func processExcelData(fileID string, srv *drive.Service, keywords []string) {
-	resp, err := srv.Files.Get(fileID).Download()
+func processExcelData(file *drive.File, srv *drive.Service, keywords []string) {
+	var resp *http.Response
+	var err error
+
+	// Export native Google Sheets to Excel format, otherwise download directly
+	if file.MimeType == "application/vnd.google-apps.spreadsheet" {
+		resp, err = srv.Files.Export(file.Id, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet").Download()
+	} else {
+		resp, err = srv.Files.Get(file.Id).Download()
+	}
+
 	if err != nil {
-		log.Printf("Failed to download file %s: %v", fileID, err)
+		logf("Skipping file %s: %v\n", file.Name, err)
 		return
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("Failed to read download for file %s: %v", fileID, err)
+		logf("Failed to read download for file %s: %v\n", file.Name, err)
 		return
 	}
 
 	f, err := excelize.OpenReader(bytes.NewReader(data))
 	if err != nil {
-		log.Printf("Failed to open file %s: %v", fileID, err)
+		logf("Failed to open file %s: %v\n", file.Name, err)
 		return
 	}
 	defer f.Close()
 
-	rows, err := f.GetRows("Sheet1")
-	if err != nil {
-		log.Printf("Failed to read rows from file %s: %v", fileID, err)
-		return
+	var allRows [][]string
+
+	// Dynamically read every sheet
+	for _, sheetName := range f.GetSheetList() {
+		sheetRows, err := f.GetRows(sheetName)
+		if err != nil {
+			logf("Failed to read rows from sheet %s in file %s: %v\n", sheetName, file.Name, err)
+			continue
+		}
+		allRows = append(allRows, sheetRows...)
 	}
 
 	matchCount := 0
 
-	// Scan and aggregate based on dynamic keywords
-	for rowIndex, row := range rows {
+	// Scan and aggregate
+	for rowIndex, row := range allRows {
 		for _, cellValue := range row {
 			for _, keyword := range keywords {
-				// Using case-insensitive matching for better general utility
 				if strings.Contains(strings.ToLower(cellValue), strings.ToLower(keyword)) {
-					logf("[Match] Row %d: Triggered by '%s' (Cell Value: %s)\n", rowIndex+1, keyword, cellValue)
+					logf("[Match] File: %s | Row %d: Triggered by '%s' (Cell Value: %s)\n", file.Name, rowIndex+1, keyword, cellValue)
 					matchCount++
 				}
 			}
@@ -172,9 +221,9 @@ func processExcelData(fileID string, srv *drive.Service, keywords []string) {
 	}
 
 	if matchCount == 0 {
-		logf("No matches found in this file.\n")
+		logf("No matches found in %s.\n", file.Name)
 	} else {
-		logf("Total matches found: %d\n", matchCount)
+		logf("Total matches found in %s: %d\n", file.Name, matchCount)
 	}
 }
 
