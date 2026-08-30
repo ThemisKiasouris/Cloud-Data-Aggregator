@@ -1,3 +1,4 @@
 .env
 .env.local
 credentials.json
+data-aggregator.exe
