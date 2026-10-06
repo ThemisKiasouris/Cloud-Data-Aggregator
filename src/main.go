@@ -27,7 +27,10 @@ func main() {
 		fmt.Println("Download flag enabled. Search will still run in this version.")
 	}
 
-	targetKeywords := parseKeywords(*keywordsFlag)
+	targetKeywords, err := parseKeywords(*keywordsFlag)
+	if err != nil {
+		log.Fatalf("Invalid keywords: %v", err)
+	}
 	if len(targetKeywords) == 0 {
 		log.Fatal("No keywords provided. Use -key \"keyword1,keyword2\".")
 	}
@@ -60,4 +63,13 @@ func main() {
 	}
 
 	scanFolder(ctx, srv, folderID, targetKeywords)
+
+	if *download {
+		outputFile, err := writeResults()
+		if err != nil {
+			log.Fatalf("Failed to write results: %v", err)
+		} else {
+			logf("Results written to: %s\n", outputFile)
+		}
+	}
 }

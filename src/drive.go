@@ -47,7 +47,7 @@ func listAllFiles(ctx context.Context, srv *drive.Service, folderID string) ([]*
 	return allFiles, nil
 }
 
-func scanFolder(ctx context.Context, srv *drive.Service, folderID string, targetKeywords []string) {
+func scanFolder(ctx context.Context, srv *drive.Service, folderID string, targetKeywords []Keyword) {
 	allFiles, err := listAllFiles(ctx, srv, folderID)
 	if err != nil {
 		log.Fatalf("Unable to retrieve files: %v", err)
